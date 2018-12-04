@@ -48,7 +48,7 @@ extensions = [
     'sphinx.ext.mathjax',
     'sphinx.ext.viewcode',
     'sphinx.ext.napoleon',
-    'jupyter_sphinx.execute',
+    # 'jupyter_sphinx.execute',
     'sphinx_fontawesome',
     'm2r',
 ]
@@ -155,9 +155,77 @@ def remove_jquery_and_underscore(app):
                                     if remove(x)]
 
 
+from copy import copy
+from docutils.nodes import NodeVisitor
+from jupyter_sphinx.execute import JupyterCellNode, blank_nb, sphinx_abs_dir
+import nbformat.v4
+
+class Visitor(NodeVisitor):
+    def __init__(self, document):
+        super().__init__(document)
+        # all trees
+        self.components = []
+
+        # per-tree traversal state
+        self.cur = None
+        self.ancestors = []
+
+    def dispatch_visit(self, node):
+        node_copy = copy(node)
+        node_copy.children = []
+
+        if not self.cur: # visiting Root of new tree
+            assert not self.ancestors
+            self.components.append(node_copy)
+            self.cur = node_copy
+        elif isinstance(node, JupyterCellNode):  # visiting root of marker tree
+            self.components.append(node_copy)
+            self.cur = node_copy
+            self.ancestors = []
+        else:
+            self.cur.children.append(node_copy)
+            self.ancestors.append(self.cur)
+            self.cur = node_copy
+
+    def dispatch_departure(self, node):
+        if self.ancestors:
+            self.cur = self.ancestors.pop()
+        else:
+            self.cur = None  # outside and root
+
+
+def create_notebooks_with_output(app, pagename, templatename, context, doctree):
+    is_code = lambda n: isinstance(n, JupyterCellNode)
+    if doctree is None or not any(map(is_code, doctree.traverse())):
+        return
+
+    visitor = Visitor(doctree)
+    doctree.walkabout(visitor)
+    visitor.cur  # copy of tree
+    cells = []
+    for node in visitor.components:
+        if is_code(node):
+            code = node.children[0].astext()
+            cell = nbformat.v4.new_code_cell(code)
+        else:
+            body = app.builder.render_partial(node)['body']
+            cell = nbformat.v4.new_markdown_cell(body)
+        cells.append(cell)
+
+    nb = blank_nb('python3')
+    nb.cells = cells
+
+    # Write nb to file
+    fname = pagename.replace('/', '-') + '.ipynb'
+    output_dir = sphinx_abs_dir(doctree.settings.env)
+    nbformat.write(nb, os.path.join(output_dir, fname))
+    # import pdb; pdb.set_trace()
+
+
 def setup(app):
     for url in css:
         app.add_stylesheet(url)
 
     app.add_stylesheet('custom.css')  # For the `live_info` widget
     app.connect('builder-inited', remove_jquery_and_underscore)
+    app.connect('html-page-context', create_notebooks_with_output)
